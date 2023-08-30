@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "${env:HOME}/.local/bin/zig build",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "run fsnotify tests",
+            "type": "shell",
+            "command": "${env:HOME}/.local/bin/zig test -framework CoreServices -framework CoreFoundation -femit-bin=${workspaceFolder}/zig-out/lib/fsnotify-test ${workspaceFolder}/src/fsnotify.zig",
+            "problemMatcher": [],
+            "group": {
+                "kind": "test",
+            }
+        },{
+            "label": "run macos tests",
+            "type": "shell",
+            "command": "${env:HOME}/.local/bin/zig test -framework CoreServices -framework CoreFoundation -femit-bin=${workspaceFolder}/zig-out/lib/macos-test ${workspaceFolder}/src/macos.zig",
+            "problemMatcher": [],
+            "group": {
+                "kind": "test",
+            }
+        },
+    ]
+}
