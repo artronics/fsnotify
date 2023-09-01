@@ -21,6 +21,18 @@ fn createCFStringArray(alloc: Allocator, strings: []const []const u8) !c.CFArray
     return c.CFArrayCreate(null, arr.ptr, @bitCast(strings.len), &c.kCFTypeArrayCallBacks);
 }
 
+pub const Stream = struct {
+    allocator: Allocator,
+
+    const Self = @This();
+    pub fn init(allocator: Allocator) Self {
+        return Self{
+            .allocator = allocator,
+        };
+    }
+    pub fn deinit() void {}
+};
+
 test "CF utils" {
     const alloc = testing.allocator;
     const foo = "foo";
@@ -33,31 +45,6 @@ test "CF utils" {
     const cf_str_arr = try createCFStringArray(alloc, &arr);
     try expect(cf_str_arr != null);
 }
-const Notify = struct {
-    fn init(allocator: Allocator, path: []const u8) !void {
-        const paths = .{path};
-        const arr = try createCFStringArray(allocator, &paths);
-        var context = c.FSEventStreamContext{
-            .version = 0,
-            .info = null,
-            .retain = null,
-            .release = null,
-            .copyDescription = null,
-        };
-        var stream_flags: c_uint = c.kFSEventStreamCreateFlagFileEvents;
-        const stream = c.FSEventStreamCreate(
-            null,
-            null,
-            &context,
-            arr,
-            c.kFSEventStreamEventIdSinceNow,
-            1.0,
-            stream_flags,
-        );
-        const fsevents_queue = c.dispatch_queue_create("fsnotify_event_queue", null);
-        c.FSEventStreamSetDispatchQueue(stream, fsevents_queue);
-    }
-};
 
 const EventCallback = struct {
     //ConstFSEventStreamRef, ?*anyopaque, usize, ?*anyopaque, [*c]const FSEventStreamEventFlags, [*c]const FSEventStreamEventId
@@ -108,5 +95,4 @@ test "macos" {
     } else {
         try expect(false);
     }
-
 }

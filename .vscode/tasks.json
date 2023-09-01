@@ -20,6 +20,14 @@
                 "kind": "test",
             }
         },{
+            "label": "run fsevent tests",
+            "type": "shell",
+            "command": "${env:HOME}/.local/bin/zig test -framework CoreServices -framework CoreFoundation -femit-bin=${workspaceFolder}/zig-out/lib/fsevent-test ${workspaceFolder}/src/fsevent.zig",
+            "problemMatcher": [],
+            "group": {
+                "kind": "test",
+            }
+        },{
             "label": "run macos tests",
             "type": "shell",
             "command": "${env:HOME}/.local/bin/zig test -framework CoreServices -framework CoreFoundation -femit-bin=${workspaceFolder}/zig-out/lib/macos-test ${workspaceFolder}/src/macos.zig",
