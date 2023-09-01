@@ -15,6 +15,32 @@ pub const Event = struct {
         const since_now = Id{ .value = c.kFSEventStreamEventIdSinceNow };
         value: u64,
     };
+    pub const Flag = enum(u32) {
+        none = c.kFSEventStreamEventFlagNone,
+        must_scan_sub_dirs = c.kFSEventStreamEventFlagMustScanSubDirs,
+        user_dropped = c.kFSEventStreamEventFlagUserDropped,
+        kernel_dropped = c.kFSEventStreamEventFlagKernelDropped,
+        event_ids_wrapped = c.kFSEventStreamEventFlagEventIdsWrapped,
+        history_done = c.kFSEventStreamEventFlagHistoryDone,
+        root_changed = c.kFSEventStreamEventFlagRootChanged,
+        mount = c.kFSEventStreamEventFlagMount,
+        unmount = c.kFSEventStreamEventFlagUnmount,
+        item_created = c.kFSEventStreamEventFlagItemCreated,
+        item_removed = c.kFSEventStreamEventFlagItemRemoved,
+        item_inode_meta_mod = c.kFSEventStreamEventFlagItemInodeMetaMod,
+        item_renamed = c.kFSEventStreamEventFlagItemRenamed,
+        item_modified = c.kFSEventStreamEventFlagItemModified,
+        item_finder_info_mod = c.kFSEventStreamEventFlagItemFinderInfoMod,
+        item_change_owner = c.kFSEventStreamEventFlagItemChangeOwner,
+        item_xattr_mod = c.kFSEventStreamEventFlagItemXattrMod,
+        item_is_file = c.kFSEventStreamEventFlagItemIsFile,
+        item_is_dir = c.kFSEventStreamEventFlagItemIsDir,
+        item_is_symlink = c.kFSEventStreamEventFlagItemIsSymlink,
+        own_event = c.kFSEventStreamEventFlagOwnEvent,
+        item_is_hardlink = c.kFSEventStreamEventFlagItemIsHardlink,
+        item_is_last_hardlink = c.kFSEventStreamEventFlagItemIsLastHardlink,
+        item_cloned = c.kFSEventStreamEventFlagItemCloned,
+    };
 };
 pub const StreamCreateFlags = enum(u32) {
     none = c.kFSEventStreamCreateFlagNone,
@@ -46,6 +72,7 @@ pub const FsEvent = struct {
         return struct {
             const Self = @This();
 
+            // All memory will be freed. Make a copy if you need reference.
             pub const UserCallback = fn (info: ?*const UserInfo, events: []Event) void;
 
             const Info = struct {
@@ -75,7 +102,7 @@ pub const FsEvent = struct {
                     const cb_info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(clientCallBackInfo);
                     const info = cb_info orelse unreachable;
 
-                    // TODO: in case of error allocated a buffer and log the error
+                    // TODO: in case of error, allocate a buffer and log the error
                     var events_raw = std.c.malloc(@sizeOf(Event) * numEvents) orelse return;
                     var events_slice: [*]Event = @alignCast(@ptrCast(events_raw));
                     var events: []Event = undefined;
@@ -86,6 +113,7 @@ pub const FsEvent = struct {
                         events[i] = Event{ .flag = 1, .id = Event.Id{ .value = 0 }, .path = "foo" };
                     }
                     info.user_callback(info.user_info, events);
+                    std.c.free(events_raw);
 
                     _ = eventFlags;
                     _ = eventPaths;
