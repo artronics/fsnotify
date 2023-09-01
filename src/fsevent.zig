@@ -27,12 +27,12 @@ pub const StreamCreateFlags = enum(u32) {
     use_extended_data = c.kFSEventStreamCreateFlagUseExtendedData,
     full_history = c.kFSEventStreamCreateFlagFullHistory,
     fn combine(flags: []const StreamCreateFlags) c_uint {
-        var f: c_uint = 0;
+        var result: c_uint = 0;
         for (flags) |flag| {
-            f |= @intCast(@intFromEnum(flag));
+            result |= @intCast(@intFromEnum(flag));
         }
 
-        return f;
+        return result;
     }
     test "StreamCreateFlags" {
         const flags = [_]StreamCreateFlags{ StreamCreateFlags.none, StreamCreateFlags.use_cf_types, StreamCreateFlags.no_defer };
@@ -126,10 +126,10 @@ pub const FsEvent = struct {
         return struct {
             const Self = @This();
 
-            pub const UserCallback = fn (info: ?*UserInfo, events: []Event) void;
+            pub const UserCallback = fn (info: ?*const UserInfo, events: []Event) void;
 
             const Info = struct {
-                user_info: ?*UserInfo,
+                user_info: ?*const UserInfo,
                 user_callback: *const UserCallback,
             };
 
@@ -155,7 +155,7 @@ pub const FsEvent = struct {
                     std.log.warn("From stream callback: numEvents: {d}", .{numEvents});
                     const info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(clientCallBackInfo);
 
-                    info.?.user_callback(null, undefined);
+                    info.?.user_callback(info.?.user_info, undefined);
 
                     _ = eventFlags;
                     _ = eventPaths;
@@ -164,7 +164,7 @@ pub const FsEvent = struct {
                 }
             };
 
-            pub fn init(allocator: Allocator, callback: *const UserCallback, paths: []const []const u8, latency: f64, create_flags: []const StreamCreateFlags) !Self {
+            pub fn init(allocator: Allocator, user_info: ?*const UserInfo, callback: *const UserCallback, paths: []const []const u8, latency: f64, create_flags: []const StreamCreateFlags) !Self {
                 var arena = ArenaAllocator.init(allocator);
                 const alloc = arena.allocator();
 
@@ -175,9 +175,14 @@ pub const FsEvent = struct {
                     cp_paths[i] = cp_p;
                 }
 
+                const cp_u_info = if (user_info) |i| blk: {
+                    var s = try alloc.create(UserInfo);
+                    s.* = i.*;
+                    break :blk s;
+                } else null;
                 var info = try alloc.create(Info);
                 info.* = Info{
-                    .user_info = null,
+                    .user_info = cp_u_info,
                     .user_callback = callback,
                 };
                 const context = Context{ .info = info };
@@ -219,14 +224,14 @@ pub const FsEvent = struct {
             }
             const Context = struct {
                 version: usize = 0,
-                info: *Info,
+                info: *const Info,
 
                 fn toFsEventStreamContext(ctx: Context) c.FSEventStreamContext {
                     std.debug.assert(ctx.version == 0);
 
                     return c.FSEventStreamContext{
                         .version = 0,
-                        .info = ctx.info,
+                        .info = @constCast(ctx.info),
                         .retain = null,
                         .release = null,
                         .copyDescription = null,
@@ -259,19 +264,20 @@ test "fsevent" {
     // pub const Callback = *const fn (info: ?*Info, events: []Event) void;
 
     const a = testing.allocator;
-    const Info = usize;
-    const Stream = FsEvent.Stream(Info);
+    const MyInfo = usize;
+    const my_info: MyInfo = 42;
+    const Stream = FsEvent.Stream(MyInfo);
     const paths = [2][]const u8{ "/Users/jalal/tmp/prism", "/Users/jalal/tmp/linux" };
 
     const Cb = struct {
-        fn callback(info: ?*Info, events: []Event) void {
+        fn callback(info: ?*const MyInfo, events: []Event) void {
             std.log.warn("from user callback", .{});
-            _ = info;
+            std.log.warn("info {d}", .{info.?.*});
             _ = events;
         }
     };
     const flags = &[_]StreamCreateFlags{.none};
-    var stream = try Stream.init(a, Cb.callback, &paths, 1.0, flags);
+    var stream = try Stream.init(a, &my_info, Cb.callback, &paths, 1.0, flags);
     defer stream.deinit();
 
     const dispatch_q = DispatchQueue{ .label = "my dispatch q" };
