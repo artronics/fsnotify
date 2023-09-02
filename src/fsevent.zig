@@ -41,6 +41,20 @@ pub const Event = struct {
         item_cloned: bool = false,
         _: u9 = 0,
     };
+    // TODO: change this to format
+    pub fn print(e: Event, allocator: Allocator) ![]const u8 {
+        var str = std.ArrayList(u8).init(allocator);
+        defer str.deinit();
+
+        inline for (@typeInfo(Event.Flags).Struct.fields) |field| {
+            if (field.type == bool and @as(field.type, @field(e.flags, field.name))) {
+                try str.appendSlice(field.name);
+                try str.appendSlice(", ");
+            }
+
+        }
+        return try std.fmt.allocPrint(allocator, "Event[{d}]: [{s}] -> {s}", .{e.id.value, e.path, str.items});
+    }
 };
 pub const StreamCreateFlags = packed struct(u32) {
     use_cf_types: bool = false,
@@ -216,26 +230,35 @@ fn createCFStringArray(alloc: Allocator, strings: []const [:0]const u8) !c.CFArr
 }
 test "fsevent" {
     const a = testing.allocator;
+    var test_fs = try TestFs.init(a);
+    defer test_fs.deinit();
+
     const MyInfo = usize;
     const my_info: MyInfo = 42;
     const Stream = FsEvent.Stream(MyInfo);
-    const paths = [2][]const u8{ "/Users/jalal/tmp/prism", "/Users/jalal/tmp/linux" };
+    // const paths = [2][]const u8{ "/Users/jalal/tmp/prism", "/Users/jalal/tmp/linux" };
+    const paths = try test_fs.paths();
 
     const Cb = struct {
         fn callback(info: ?*const MyInfo, events: []Event) void {
-            std.log.warn("from user callback", .{});
-            std.log.warn("info {d}", .{info.?.*});
+            // std.log.warn("from user callback", .{});
+            // std.log.warn("info {d}", .{info.?.*});
+            _ = info;
             for (events) |e| {
-                std.log.warn("event {}", .{e});
+                const str = e.print(a) catch "Error has occurred when printing event value";
+                defer a.free(str);
+                std.log.warn("{s}", .{str});
             }
         }
     };
     const flags = StreamCreateFlags{ .file_events = true };
-    var stream = try Stream.init(a, &my_info, Cb.callback, &paths, 1.0, flags);
+    var stream = try Stream.init(a, &my_info, Cb.callback, paths, 1.0, flags);
     defer stream.deinit();
 
     const dispatch_q = DispatchQueue{ .label = "my dispatch q" };
     const started = try stream.start(Event.Id.since_now, dispatch_q);
+
+    try test_fs.exec();
 
     try expect(started == true);
     while (true) {}
@@ -251,3 +274,86 @@ test "CF utils" {
     const cf_str_arr = try createCFStringArray(alloc, &arr);
     try expect(cf_str_arr != null);
 }
+
+const TestFs = struct {
+    const fs = std.fs;
+    const log = std.log.warn;
+
+    arena: ArenaAllocator,
+    tmp_dir: testing.TmpDir,
+
+    var root_a_b_c: fs.File = undefined;
+
+    const Scenario = struct {
+        name: []const u8,
+        exec: *const fn (name: []const u8) anyerror!void,
+        expected_event: Event,
+    };
+
+    const scenarios = struct {
+        values: []const Scenario = &values,
+        fn s1(name: []const u8) !void {
+            log("running scenario: {s}", .{name});
+        }
+        const values = [_]Scenario{
+            .{
+                .expected_event = Event{
+                    .flags = Event.Flags{ .item_is_file = true },
+                    .path = "foo",
+                    .id = Event.Id{ .value = 0x0 },
+                },
+                .name = "first scenario",
+                .exec = s1,
+            },
+        };
+    }{};
+
+    fn init(allocator: Allocator) !TestFs {
+        var arena = ArenaAllocator.init(allocator);
+
+        var tmp_dir = testing.tmpDir(.{});
+        try TestFs.makeTestFs(tmp_dir);
+        return .{
+            .arena = arena,
+            .tmp_dir = tmp_dir,
+        };
+    }
+    fn deinit(tfs: *TestFs) void {
+        tfs.tmp_dir.cleanup();
+        tfs.arena.deinit();
+    }
+    fn exec(tfs: TestFs) !void {
+        _ = tfs;
+        log("running test scenarios...", .{});
+        for (scenarios.values) |s| {
+            try s.exec(s.name);
+        }
+    }
+    fn paths(tfs: *TestFs) ![]const []const u8 {
+        const alloc = tfs.arena.allocator();
+        const root = try tfs.tmp_dir.dir.realpathAlloc(alloc, "root");
+        const a = try std.fmt.allocPrint(alloc, "{s}/a", .{root});
+        const d = try std.fmt.allocPrint(alloc, "{s}/d", .{root});
+        var ps = try alloc.alloc([]const u8, 2);
+        ps[0] = a;
+        ps[1] = d;
+
+        return ps;
+    }
+
+    /// create a simple nested directory structure for testing
+    /// /root
+    ///   /a
+    ///     /b
+    ///       c
+    ///   /d
+    ///     e
+    ///   f
+    fn makeTestFs(dir: testing.TmpDir) !void {
+        try dir.dir.makePath("root/a/b");
+        try dir.dir.makePath("root/d");
+        TestFs.root_a_b_c = try dir.dir.createFile("root/a/b/c", .{});
+        _ = try dir.dir.createFile("root/d/e", .{});
+        _ = try dir.dir.createFile("root/f", .{});
+    }
+};
