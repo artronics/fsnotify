@@ -43,14 +43,14 @@ pub const Event = struct {
     };
 };
 pub const StreamCreateFlags = packed struct(u32) {
-    use_cf_types :bool = false,
-    no_defer :bool = false,
-    watch_root :bool = false,
-    ignore_self :bool = false,
-    file_events :bool = false,
-    mark_self :bool = false,
-    use_extended_data :bool = false,
-    full_history :bool = false,
+    use_cf_types: bool = false,
+    no_defer: bool = false,
+    watch_root: bool = false,
+    ignore_self: bool = false,
+    file_events: bool = false,
+    mark_self: bool = false,
+    use_extended_data: bool = false,
+    full_history: bool = false,
 
     _: u24 = 0,
 };
@@ -80,44 +80,45 @@ pub const FsEvent = struct {
             const StreamCallback = struct {
                 fn callback(
                     stream: c.ConstFSEventStreamRef,
-                    clientCallBackInfo: ?*anyopaque,
-                    numEvents: usize,
-                    eventPaths: ?*anyopaque,
-                    eventFlags: [*c]const c.FSEventStreamEventFlags,
+                    client_cb_info: ?*anyopaque,
+                    num_events: usize,
+                    event_paths: ?*anyopaque,
+                    event_flags: [*c]const c.FSEventStreamEventFlags,
                     event_ids: [*c]const c.FSEventStreamEventId,
                 ) callconv(.C) void {
-                    std.log.warn("From stream callback: numEvents: {d}", .{numEvents});
-                    const cb_info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(clientCallBackInfo);
+                    std.log.warn("From stream callback: numEvents: {d}", .{num_events});
+                    const cb_info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(client_cb_info);
                     const info = cb_info orelse unreachable;
 
                     // TODO: in case of error, allocate a buffer and log the error
-                    var events_raw = std.c.malloc(@sizeOf(Event) * numEvents) orelse return;
+                    var events_raw = std.c.malloc(@sizeOf(Event) * num_events) orelse return;
                     defer std.c.free(events_raw);
                     var events_slice: [*]Event = @alignCast(@ptrCast(events_raw));
                     var events: []Event = undefined;
                     events.ptr = @ptrCast(events_slice);
-                    events.len = numEvents;
+                    events.len = num_events;
 
-                    var flags_slice: [*]const c.UInt32 = @ptrCast(eventFlags);
+                    var flags_slice: [*]const c.UInt32 = @ptrCast(event_flags);
                     var flagsets: []c.UInt32 = undefined;
                     flagsets.ptr = @constCast(@ptrCast(flags_slice));
-                    flagsets.len = numEvents;
+                    flagsets.len = num_events;
 
-                    var ids_slice : [*]const c.UInt64 = @ptrCast(event_ids);
+                    var ids_slice: [*]const c.UInt64 = @ptrCast(event_ids);
                     var ids: []c.UInt64 = undefined;
                     ids.ptr = @constCast(@ptrCast(ids_slice));
-                    ids.len = numEvents;
+                    ids.len = num_events;
 
-                    for (0..numEvents) |i| {
+                    for (0..num_events) |i| {
                         std.log.warn("event flag: {x}", .{flagsets[i]});
                         const flagset: Event.Flags = @bitCast(@as(u32, @intCast(flagsets[i])));
-                        const id = Event.Id{.value = @intCast(ids[i])};
+                        const id = Event.Id{ .value = @intCast(ids[i]) };
 
                         events[i] = Event{ .flags = flagset, .id = id, .path = "foo" };
                     }
+
                     info.user_callback(info.user_info, events);
 
-                    _ = eventPaths;
+                    _ = event_paths;
                     _ = stream;
                 }
             };
@@ -146,14 +147,7 @@ pub const FsEvent = struct {
 
                 const context = Context{ .info = info };
 
-                return Self{
-                    .arena = arena,
-                    .callback = callback,
-                    .context = context,
-                    .paths = cp_paths,
-                    .latency = latency,
-                    .create_flags = create_flags
-                };
+                return Self{ .arena = arena, .callback = callback, .context = context, .paths = cp_paths, .latency = latency, .create_flags = create_flags };
             }
 
             pub fn deinit(self: Self) void {
