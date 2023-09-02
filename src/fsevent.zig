@@ -9,62 +9,50 @@ const expect = testing.expect;
 
 pub const Event = struct {
     path: []const u8,
-    flag: usize,
+    flags: Flags,
     id: Id,
     pub const Id = struct {
         const since_now = Id{ .value = c.kFSEventStreamEventIdSinceNow };
         value: u64,
     };
-    pub const Flag = enum(u32) {
-        none = c.kFSEventStreamEventFlagNone,
-        must_scan_sub_dirs = c.kFSEventStreamEventFlagMustScanSubDirs,
-        user_dropped = c.kFSEventStreamEventFlagUserDropped,
-        kernel_dropped = c.kFSEventStreamEventFlagKernelDropped,
-        event_ids_wrapped = c.kFSEventStreamEventFlagEventIdsWrapped,
-        history_done = c.kFSEventStreamEventFlagHistoryDone,
-        root_changed = c.kFSEventStreamEventFlagRootChanged,
-        mount = c.kFSEventStreamEventFlagMount,
-        unmount = c.kFSEventStreamEventFlagUnmount,
-        item_created = c.kFSEventStreamEventFlagItemCreated,
-        item_removed = c.kFSEventStreamEventFlagItemRemoved,
-        item_inode_meta_mod = c.kFSEventStreamEventFlagItemInodeMetaMod,
-        item_renamed = c.kFSEventStreamEventFlagItemRenamed,
-        item_modified = c.kFSEventStreamEventFlagItemModified,
-        item_finder_info_mod = c.kFSEventStreamEventFlagItemFinderInfoMod,
-        item_change_owner = c.kFSEventStreamEventFlagItemChangeOwner,
-        item_xattr_mod = c.kFSEventStreamEventFlagItemXattrMod,
-        item_is_file = c.kFSEventStreamEventFlagItemIsFile,
-        item_is_dir = c.kFSEventStreamEventFlagItemIsDir,
-        item_is_symlink = c.kFSEventStreamEventFlagItemIsSymlink,
-        own_event = c.kFSEventStreamEventFlagOwnEvent,
-        item_is_hardlink = c.kFSEventStreamEventFlagItemIsHardlink,
-        item_is_last_hardlink = c.kFSEventStreamEventFlagItemIsLastHardlink,
-        item_cloned = c.kFSEventStreamEventFlagItemCloned,
+    pub const Flags = packed struct(u32) {
+        must_scan_sub_dirs: bool = false,
+        user_dropped: bool = false,
+        kernel_dropped: bool = false,
+        event_ids_wrapped: bool = false,
+        history_done: bool = false,
+        root_changed: bool = false,
+        mount: bool = false,
+        unmount: bool = false,
+        item_created: bool = false,
+        item_removed: bool = false,
+        item_inode_meta_mod: bool = false,
+        item_renamed: bool = false,
+        item_modified: bool = false,
+        item_finder_info_mod: bool = false,
+        item_change_owner: bool = false,
+        item_xattr_mod: bool = false,
+        item_is_file: bool = false,
+        item_is_dir: bool = false,
+        item_is_symlink: bool = false,
+        own_event: bool = false,
+        item_is_hardlink: bool = false,
+        item_is_last_hardlink: bool = false,
+        item_cloned: bool = false,
+        _: u9 = 0,
     };
 };
-pub const StreamCreateFlags = enum(u32) {
-    none = c.kFSEventStreamCreateFlagNone,
-    use_cf_types = c.kFSEventStreamCreateFlagUseCFTypes,
-    no_defer = c.kFSEventStreamCreateFlagNoDefer,
-    watch_root = c.kFSEventStreamCreateFlagWatchRoot,
-    ignore_self = c.kFSEventStreamCreateFlagIgnoreSelf,
-    file_events = c.kFSEventStreamCreateFlagFileEvents,
-    mark_self = c.kFSEventStreamCreateFlagMarkSelf,
-    use_extended_data = c.kFSEventStreamCreateFlagUseExtendedData,
-    full_history = c.kFSEventStreamCreateFlagFullHistory,
-    fn combine(flags: []const StreamCreateFlags) c_uint {
-        var result: c_uint = 0;
-        for (flags) |flag| {
-            result |= @intCast(@intFromEnum(flag));
-        }
+pub const StreamCreateFlags = packed struct(u32) {
+    use_cf_types :bool = false,
+    no_defer :bool = false,
+    watch_root :bool = false,
+    ignore_self :bool = false,
+    file_events :bool = false,
+    mark_self :bool = false,
+    use_extended_data :bool = false,
+    full_history :bool = false,
 
-        return result;
-    }
-    test "StreamCreateFlags" {
-        const flags = [_]StreamCreateFlags{ StreamCreateFlags.none, StreamCreateFlags.use_cf_types, StreamCreateFlags.no_defer };
-        const exp_flags = StreamCreateFlags.combine(&flags);
-        try expect(3 == exp_flags);
-    }
+    _: u24 = 0,
 };
 
 pub const FsEvent = struct {
@@ -85,7 +73,7 @@ pub const FsEvent = struct {
             context: Context,
             paths: []const [:0]const u8,
             latency: f64,
-            create_flags: c_uint,
+            create_flags: StreamCreateFlags,
 
             _ref: *const Self = undefined,
 
@@ -96,7 +84,7 @@ pub const FsEvent = struct {
                     numEvents: usize,
                     eventPaths: ?*anyopaque,
                     eventFlags: [*c]const c.FSEventStreamEventFlags,
-                    id: [*c]const c.FSEventStreamEventId,
+                    event_ids: [*c]const c.FSEventStreamEventId,
                 ) callconv(.C) void {
                     std.log.warn("From stream callback: numEvents: {d}", .{numEvents});
                     const cb_info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(clientCallBackInfo);
@@ -104,25 +92,37 @@ pub const FsEvent = struct {
 
                     // TODO: in case of error, allocate a buffer and log the error
                     var events_raw = std.c.malloc(@sizeOf(Event) * numEvents) orelse return;
+                    defer std.c.free(events_raw);
                     var events_slice: [*]Event = @alignCast(@ptrCast(events_raw));
                     var events: []Event = undefined;
                     events.ptr = @ptrCast(events_slice);
                     events.len = numEvents;
 
+                    var flags_slice: [*]const c.UInt32 = @ptrCast(eventFlags);
+                    var flagsets: []c.UInt32 = undefined;
+                    flagsets.ptr = @constCast(@ptrCast(flags_slice));
+                    flagsets.len = numEvents;
+
+                    var ids_slice : [*]const c.UInt64 = @ptrCast(event_ids);
+                    var ids: []c.UInt64 = undefined;
+                    ids.ptr = @constCast(@ptrCast(ids_slice));
+                    ids.len = numEvents;
+
                     for (0..numEvents) |i| {
-                        events[i] = Event{ .flag = 1, .id = Event.Id{ .value = 0 }, .path = "foo" };
+                        std.log.warn("event flag: {x}", .{flagsets[i]});
+                        const flagset: Event.Flags = @bitCast(@as(u32, @intCast(flagsets[i])));
+                        const id = Event.Id{.value = @intCast(ids[i])};
+
+                        events[i] = Event{ .flags = flagset, .id = id, .path = "foo" };
                     }
                     info.user_callback(info.user_info, events);
-                    std.c.free(events_raw);
 
-                    _ = eventFlags;
                     _ = eventPaths;
                     _ = stream;
-                    _ = id;
                 }
             };
 
-            pub fn init(allocator: Allocator, user_info: ?*const UserInfo, callback: *const UserCallback, paths: []const []const u8, latency: f64, create_flags: []const StreamCreateFlags) !Self {
+            pub fn init(allocator: Allocator, user_info: ?*const UserInfo, callback: *const UserCallback, paths: []const []const u8, latency: f64, create_flags: StreamCreateFlags) !Self {
                 var arena = ArenaAllocator.init(allocator);
                 const alloc = arena.allocator();
 
@@ -152,7 +152,7 @@ pub const FsEvent = struct {
                     .context = context,
                     .paths = cp_paths,
                     .latency = latency,
-                    .create_flags = StreamCreateFlags.combine(create_flags),
+                    .create_flags = create_flags
                 };
             }
 
@@ -165,6 +165,7 @@ pub const FsEvent = struct {
                 var ctx = self.context.toFsEventStreamContext();
                 const paths = try createCFStringArray(alloc, self.paths);
                 const event_id: c_ulonglong = @intCast(since.value);
+                const create_flags: c_uint = @bitCast(self.create_flags);
 
                 const stream = c.FSEventStreamCreate(
                     null,
@@ -173,7 +174,7 @@ pub const FsEvent = struct {
                     paths,
                     event_id,
                     self.latency,
-                    self.create_flags,
+                    create_flags,
                 );
                 const fsevents_queue = c.dispatch_queue_create(dispatch_queue.label, null);
                 c.FSEventStreamSetDispatchQueue(stream, fsevents_queue);
@@ -235,14 +236,14 @@ test "fsevent" {
             }
         }
     };
-    const flags = &[_]StreamCreateFlags{.none};
+    const flags = StreamCreateFlags{ .file_events = true };
     var stream = try Stream.init(a, &my_info, Cb.callback, &paths, 1.0, flags);
     defer stream.deinit();
 
     const dispatch_q = DispatchQueue{ .label = "my dispatch q" };
     const started = try stream.start(Event.Id.since_now, dispatch_q);
 
-    try expect(started != false);
+    try expect(started == true);
     while (true) {}
 }
 
