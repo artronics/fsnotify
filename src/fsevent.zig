@@ -43,17 +43,16 @@ pub const Event = struct {
     };
     // TODO: change this to format
     pub fn print(e: Event, allocator: Allocator) ![]const u8 {
-        var str = std.ArrayList(u8).init(allocator);
-        defer str.deinit();
+        var flags = std.ArrayList(u8).init(allocator);
+        defer flags.deinit();
 
         inline for (@typeInfo(Event.Flags).Struct.fields) |field| {
             if (field.type == bool and @as(field.type, @field(e.flags, field.name))) {
-                try str.appendSlice(field.name);
-                try str.appendSlice(", ");
+                try flags.appendSlice(field.name);
+                try flags.appendSlice(", ");
             }
-
         }
-        return try std.fmt.allocPrint(allocator, "Event[{d}]: [{s}] -> {s}", .{e.id.value, e.path, str.items});
+        return try std.fmt.allocPrint(allocator, "Event[{d}]: [{s}] -> {s}", .{ e.id.value, e.path, flags.items });
     }
 };
 pub const StreamCreateFlags = packed struct(u32) {
@@ -103,7 +102,9 @@ pub const FsEvent = struct {
                     std.log.warn("From stream callback: numEvents: {d}", .{num_events});
                     const cb_info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(client_cb_info);
                     const info = cb_info orelse unreachable;
-
+                    // We allocate memory and then call user callback in our callback.
+                    // User callback must copy the values if it needs reference. We free all the allocated memory at the end of our callback.
+                    // FIXME: Memory allocation only works via malloc (I think it's because of callconv(.C)). I tried to pass Allocator and ArenaAllocator as pointer but it didn't work either.
                     // TODO: in case of error, allocate a buffer and log the error
                     var events_raw = std.c.malloc(@sizeOf(Event) * num_events) orelse return;
                     defer std.c.free(events_raw);
@@ -122,17 +123,23 @@ pub const FsEvent = struct {
                     ids.ptr = @constCast(@ptrCast(ids_slice));
                     ids.len = num_events;
 
+                    var paths_slice: [*][*:0]u8 = @alignCast(@ptrCast(event_paths));
+                    var paths: [*][:0]u8 = @alignCast(@ptrCast(std.c.malloc(@sizeOf(?[:0]u8) * num_events) orelse return));
+
                     for (0..num_events) |i| {
-                        std.log.warn("event flag: {x}", .{flagsets[i]});
                         const flagset: Event.Flags = @bitCast(@as(u32, @intCast(flagsets[i])));
                         const id = Event.Id{ .value = @intCast(ids[i]) };
 
-                        events[i] = Event{ .flags = flagset, .id = id, .path = "foo" };
+                        paths[i].ptr = paths_slice[i];
+                        var j: usize = 0;
+                        while (paths_slice[i][j] != '\x00') : (j += 1) {}
+                        paths[i].len = j + 1;
+
+                        events[i] = Event{ .flags = flagset, .id = id, .path = paths[i] };
                     }
 
                     info.user_callback(info.user_info, events);
 
-                    _ = event_paths;
                     _ = stream;
                 }
             };
@@ -236,14 +243,11 @@ test "fsevent" {
     const MyInfo = usize;
     const my_info: MyInfo = 42;
     const Stream = FsEvent.Stream(MyInfo);
-    // const paths = [2][]const u8{ "/Users/jalal/tmp/prism", "/Users/jalal/tmp/linux" };
     const paths = try test_fs.paths();
 
     const Cb = struct {
         fn callback(info: ?*const MyInfo, events: []Event) void {
-            // std.log.warn("from user callback", .{});
-            // std.log.warn("info {d}", .{info.?.*});
-            _ = info;
+            std.log.warn("info {d}", .{info.?.*});
             for (events) |e| {
                 const str = e.print(a) catch "Error has occurred when printing event value";
                 defer a.free(str);
@@ -329,11 +333,28 @@ const TestFs = struct {
             try s.exec(s.name);
         }
     }
+    fn checkResults(tfs: TestFs, actual_events: []const Event) !void {
+        const alloc = tfs.arena.allocator();
+        const unprocessed_events = std.ArrayList(Event).initCapacity(alloc, actual_events.len);
+        try unprocessed_events.appendSlice(actual_events);
+
+        log("checking expected events...", .{});
+
+        for (scenarios.values) |s| {
+            _ = s;
+            // try s.exec(s.name);
+        }
+    }
+    fn eq_event(e1: Event, e2: Event) bool {
+        return @as(u32, @bitCast(e1.flags)) == @as(u32, @bitCast(e2.flags)) and std.mem.eql(u8, e1.path, e2.path);
+    }
     fn paths(tfs: *TestFs) ![]const []const u8 {
         const alloc = tfs.arena.allocator();
         const root = try tfs.tmp_dir.dir.realpathAlloc(alloc, "root");
+
         const a = try std.fmt.allocPrint(alloc, "{s}/a", .{root});
         const d = try std.fmt.allocPrint(alloc, "{s}/d", .{root});
+
         var ps = try alloc.alloc([]const u8, 2);
         ps[0] = a;
         ps[1] = d;
@@ -350,6 +371,7 @@ const TestFs = struct {
     ///     e
     ///   f
     fn makeTestFs(dir: testing.TmpDir) !void {
+        try dir.dir.makePath("root");
         try dir.dir.makePath("root/a/b");
         try dir.dir.makePath("root/d");
         TestFs.root_a_b_c = try dir.dir.createFile("root/a/b/c", .{});
