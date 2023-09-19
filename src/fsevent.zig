@@ -74,10 +74,10 @@ pub const FsEvent = struct {
             const Self = @This();
 
             // All memory will be freed. Make a copy if you need reference.
-            pub const UserCallback = fn (info: ?*const UserInfo, events: []Event) void;
+            pub const UserCallback = fn (info: ?*UserInfo, events: []Event) void;
 
             const Info = struct {
-                user_info: ?*const UserInfo,
+                user_info: ?*UserInfo,
                 user_callback: *const UserCallback,
             };
 
@@ -93,15 +93,14 @@ pub const FsEvent = struct {
             const StreamCallback = struct {
                 fn callback(
                     stream: c.ConstFSEventStreamRef,
-                    client_cb_info: ?*anyopaque,
+                    fs_cb_info: ?*anyopaque,
                     num_events: usize,
                     event_paths: ?*anyopaque,
                     event_flags: [*c]const c.FSEventStreamEventFlags,
                     event_ids: [*c]const c.FSEventStreamEventId,
                 ) callconv(.C) void {
-                    std.log.warn("From stream callback: numEvents: {d}", .{num_events});
-                    const cb_info: ?*align(@alignOf(anyopaque)) Info = @ptrCast(client_cb_info);
-                    const info = cb_info orelse unreachable;
+                    const cb_info: ?*Info = @alignCast(@ptrCast(fs_cb_info));
+
                     // We allocate memory and then call user callback in our callback.
                     // User callback must copy the values if it needs reference. We free all the allocated memory at the end of our callback.
                     // FIXME: Memory allocation only works via malloc (I think it's because of callconv(.C)). I tried to pass Allocator and ArenaAllocator as pointer but it didn't work either.
@@ -138,37 +137,35 @@ pub const FsEvent = struct {
                         events[i] = Event{ .flags = flagset, .id = id, .path = paths[i] };
                     }
 
-                    info.user_callback(info.user_info, events);
+                    if (cb_info) |info| {
+                        info.user_callback(info.user_info, events);
+                    }
 
                     _ = stream;
                 }
             };
 
-            pub fn init(allocator: Allocator, user_info: ?*const UserInfo, callback: *const UserCallback, paths: []const []const u8, latency: f64, create_flags: StreamCreateFlags) !Self {
+            pub fn init(allocator: Allocator, user_info: ?*UserInfo, callback: *const UserCallback, paths: []const []const u8, latency: f64, create_flags: StreamCreateFlags) !Self {
+                // FIXME this arena should come from init as a pointer
                 var arena = ArenaAllocator.init(allocator);
                 const alloc = arena.allocator();
 
-                const cp_paths = try alloc.alloc([:0]const u8, paths.len);
+                const _paths = try alloc.alloc([:0]const u8, paths.len);
                 for (paths, 0..paths.len) |p, i| {
                     const cp_p: [:0]u8 = try alloc.allocSentinel(u8, p.len, 0);
                     @memcpy(cp_p, p);
-                    cp_paths[i] = cp_p;
+                    _paths[i] = cp_p;
                 }
 
-                const cp_u_info = if (user_info) |i| blk: {
-                    var s = try alloc.create(UserInfo);
-                    s.* = i.*;
-                    break :blk s;
-                } else null;
                 var info = try alloc.create(Info);
                 info.* = Info{
-                    .user_info = cp_u_info,
+                    .user_info = user_info,
                     .user_callback = callback,
                 };
 
                 const context = Context{ .info = info };
 
-                return Self{ .arena = arena, .callback = callback, .context = context, .paths = cp_paths, .latency = latency, .create_flags = create_flags };
+                return Self{ .arena = arena, .callback = callback, .context = context, .paths = _paths, .latency = latency, .create_flags = create_flags };
             }
 
             pub fn deinit(self: Self) void {
@@ -199,14 +196,14 @@ pub const FsEvent = struct {
             }
             const Context = struct {
                 version: usize = 0,
-                info: *const Info,
+                info: *Info,
 
                 fn toFsEventStreamContext(ctx: Context) c.FSEventStreamContext {
                     std.debug.assert(ctx.version == 0);
 
                     return c.FSEventStreamContext{
                         .version = 0,
-                        .info = @constCast(ctx.info),
+                        .info = ctx.info,
                         .retain = null,
                         .release = null,
                         .copyDescription = null,
@@ -237,35 +234,36 @@ fn createCFStringArray(alloc: Allocator, strings: []const [:0]const u8) !c.CFArr
 }
 test "fsevent" {
     const a = testing.allocator;
-    var test_fs = try TestFs.init(a);
+
+    var arena = ArenaAllocator.init(a);
+    var test_fs = try TestFs.init(&arena);
     defer test_fs.deinit();
 
-    const MyInfo = usize;
-    const my_info: MyInfo = 42;
-    const Stream = FsEvent.Stream(MyInfo);
+    const Stream = FsEvent.Stream(TestFs);
     const paths = try test_fs.paths();
 
     const Cb = struct {
-        fn callback(info: ?*const MyInfo, events: []Event) void {
-            std.log.warn("info {d}", .{info.?.*});
-            for (events) |e| {
-                const str = e.print(a) catch "Error has occurred when printing event value";
-                defer a.free(str);
-                std.log.warn("{s}", .{str});
-            }
+        fn callback(info: ?*TestFs, events: []Event) void {
+            info.?.appendEvents(events) catch {
+                std.log.warn("append events to TestFs failed", .{});
+            };
         }
     };
     const flags = StreamCreateFlags{ .file_events = true };
-    var stream = try Stream.init(a, &my_info, Cb.callback, paths, 1.0, flags);
+    var stream = try Stream.init(a, &test_fs, Cb.callback, paths, 1.0, flags);
     defer stream.deinit();
 
     const dispatch_q = DispatchQueue{ .label = "my dispatch q" };
     const started = try stream.start(Event.Id.since_now, dispatch_q);
+    try expect(started == true);
 
     try test_fs.exec();
 
-    try expect(started == true);
-    while (true) {}
+    const delay_ns = 2_500_000_000;
+    std.time.sleep(delay_ns);
+    try expect(try test_fs.checkResults(2000));
+
+    // while (true) {}
 }
 
 test "CF utils" {
@@ -283,8 +281,10 @@ const TestFs = struct {
     const fs = std.fs;
     const log = std.log.warn;
 
-    arena: ArenaAllocator,
+    arena: *ArenaAllocator,
     tmp_dir: testing.TmpDir,
+    scenarios: []const Scenario,
+    events_in: std.ArrayList(Event),
 
     var root_a_b_c: fs.File = undefined;
 
@@ -294,56 +294,96 @@ const TestFs = struct {
         expected_event: Event,
     };
 
-    const scenarios = struct {
-        values: []const Scenario = &values,
-        fn s1(name: []const u8) !void {
-            log("running scenario: {s}", .{name});
-        }
-        const values = [_]Scenario{
-            .{
-                .expected_event = Event{
-                    .flags = Event.Flags{ .item_is_file = true },
-                    .path = "foo",
-                    .id = Event.Id{ .value = 0x0 },
-                },
-                .name = "first scenario",
-                .exec = s1,
-            },
-        };
-    }{};
-
-    fn init(allocator: Allocator) !TestFs {
-        var arena = ArenaAllocator.init(allocator);
+    fn init(arena: *ArenaAllocator) !TestFs {
+        const alloc = arena.allocator();
 
         var tmp_dir = testing.tmpDir(.{});
         try TestFs.makeTestFs(tmp_dir);
         return .{
             .arena = arena,
             .tmp_dir = tmp_dir,
+            .scenarios = try makeScenarios(alloc, tmp_dir),
+            .events_in = std.ArrayList(Event).init(alloc),
         };
     }
     fn deinit(tfs: *TestFs) void {
         tfs.tmp_dir.cleanup();
+        tfs.events_in.deinit();
         tfs.arena.deinit();
     }
-    fn exec(tfs: TestFs) !void {
-        _ = tfs;
+    const Funcs = struct {
+        fn logScenario(name: []const u8) !void {
+            log("running scenario: {s}", .{name});
+        }
+        fn doSomething(name: []const u8) !void {
+            log("running scenario: {s}", .{name});
+        }
+    };
+    fn makeScenarios(alloc: Allocator, dir: testing.TmpDir) ![]Scenario {
+        const root = try dir.dir.realpathAlloc(alloc, "root");
+        const a_b_c = try std.fmt.allocPrint(alloc, "{s}/a/b/c", .{root});
+
+        var scenarios = std.ArrayList(Scenario).init(alloc);
+        defer scenarios.deinit();
+        try scenarios.append(.{
+            .expected_event = Event{
+                .flags = Event.Flags{ .item_is_file = true, .item_xattr_mod = true, .item_created = true },
+                .path = a_b_c,
+                .id = Event.Id{ .value = 0x0 },
+            },
+            .name = try std.fmt.allocPrint(alloc, "create root/a/b/c file", .{}),
+            .exec = Funcs.logScenario,
+        });
+
+        return scenarios.toOwnedSlice();
+    }
+
+    fn exec(tfs: *TestFs) !void {
         log("running test scenarios...", .{});
-        for (scenarios.values) |s| {
+        for (tfs.scenarios) |s| {
             try s.exec(s.name);
         }
     }
-    fn checkResults(tfs: TestFs, actual_events: []const Event) !void {
+    fn appendEvents(tfs: *TestFs, events: []Event) !void {
+        log("received {d} events:", .{events.len});
         const alloc = tfs.arena.allocator();
-        const unprocessed_events = std.ArrayList(Event).initCapacity(alloc, actual_events.len);
-        try unprocessed_events.appendSlice(actual_events);
-
-        log("checking expected events...", .{});
-
-        for (scenarios.values) |s| {
-            _ = s;
-            // try s.exec(s.name);
+        for (events) |e| {
+            const str = e.print(alloc) catch "Error has occurred when printing event value";
+            log("{s}", .{str});
         }
+        tfs.events_in.appendSlice(events) catch {
+            log("adding events to the list failed", .{});
+        };
+    }
+    fn checkResults(tfs: *TestFs, timeout_ms: u64) !bool {
+        const alloc = tfs.arena.allocator();
+        const actual_events = tfs.events_in.items;
+
+        var unprocessed_events = try std.ArrayList(Event).initCapacity(alloc, actual_events.len);
+        try unprocessed_events.appendSlice(actual_events);
+        var unprocessed_scenarios = try std.ArrayList(Scenario).initCapacity(alloc, tfs.scenarios.len);
+        try unprocessed_scenarios.appendSlice(tfs.scenarios);
+
+        var matched_events = try std.ArrayList(Event).initCapacity(alloc, actual_events.len);
+
+        log("checking expected {d} events against {d} scenarios...", .{ actual_events.len, tfs.scenarios.len });
+
+        var timer = try std.time.Timer.start();
+        const timeout = timeout_ms * 1_000_000;
+        while (timer.read() < timeout) {
+            if (unprocessed_events.items.len == 0) return true;
+            for (unprocessed_events.items, 0..unprocessed_events.items.len) |act_event, ei| {
+                for (unprocessed_scenarios.items) |scenario| {
+                    if (eq_event(scenario.expected_event, act_event)) {
+                        log("found match ", .{});
+                        try matched_events.append(unprocessed_events.swapRemove(ei));
+                    }
+                }
+                // try s.exec(s.name);
+            }
+        }
+
+        return false;
     }
     fn eq_event(e1: Event, e2: Event) bool {
         return @as(u32, @bitCast(e1.flags)) == @as(u32, @bitCast(e2.flags)) and std.mem.eql(u8, e1.path, e2.path);
