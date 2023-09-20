@@ -41,6 +41,11 @@ pub const Event = struct {
         item_cloned: bool = false,
         _: u9 = 0,
     };
+    pub fn clone(e: Event, allocator: Allocator) !Event {
+        var path = try allocator.alloc(u8, e.path.len);
+        @memcpy(path, e.path);
+        return .{ .path = path, .flags = e.flags, .id = e.id };
+    }
     // TODO: change this to format
     pub fn print(e: Event, allocator: Allocator) ![]const u8 {
         var flags = std.ArrayList(u8).init(allocator);
@@ -132,7 +137,7 @@ pub const FsEvent = struct {
                         paths[i].ptr = paths_slice[i];
                         var j: usize = 0;
                         while (paths_slice[i][j] != '\x00') : (j += 1) {}
-                        paths[i].len = j + 1;
+                        paths[i].len = j;
 
                         events[i] = Event{ .flags = flagset, .id = id, .path = paths[i] };
                     }
@@ -259,11 +264,9 @@ test "fsevent" {
 
     try test_fs.exec();
 
-    const delay_ns = 2_500_000_000;
+    const delay_ns = 1_500_000_000;
     std.time.sleep(delay_ns);
-    try expect(try test_fs.checkResults(2000));
-
-    // while (true) {}
+    try expect(try test_fs.checkResults());
 }
 
 test "CF utils" {
@@ -321,14 +324,24 @@ const TestFs = struct {
     };
     fn makeScenarios(alloc: Allocator, dir: testing.TmpDir) ![]Scenario {
         const root = try dir.dir.realpathAlloc(alloc, "root");
-        const a_b_c = try std.fmt.allocPrint(alloc, "{s}/a/b/c", .{root});
 
         var scenarios = std.ArrayList(Scenario).init(alloc);
         defer scenarios.deinit();
+
+        try scenarios.append(.{
+            .expected_event = Event{
+                .flags = Event.Flags{ .item_is_dir = true, .item_xattr_mod = true, .item_created = true },
+                .path = try std.fmt.allocPrint(alloc, "{s}/a", .{root}),
+                .id = Event.Id{ .value = 0x0 },
+            },
+            .name = try std.fmt.allocPrint(alloc, "create root/a directory", .{}),
+            .exec = Funcs.logScenario,
+        });
+
         try scenarios.append(.{
             .expected_event = Event{
                 .flags = Event.Flags{ .item_is_file = true, .item_xattr_mod = true, .item_created = true },
-                .path = a_b_c,
+                .path = try std.fmt.allocPrint(alloc, "{s}/a/b/c", .{root}),
                 .id = Event.Id{ .value = 0x0 },
             },
             .name = try std.fmt.allocPrint(alloc, "create root/a/b/c file", .{}),
@@ -348,42 +361,28 @@ const TestFs = struct {
         log("received {d} events:", .{events.len});
         const alloc = tfs.arena.allocator();
         for (events) |e| {
+            try tfs.events_in.append(try e.clone(alloc));
             const str = e.print(alloc) catch "Error has occurred when printing event value";
             log("{s}", .{str});
         }
-        tfs.events_in.appendSlice(events) catch {
-            log("adding events to the list failed", .{});
-        };
     }
-    fn checkResults(tfs: *TestFs, timeout_ms: u64) !bool {
+    fn checkResults(tfs: *TestFs) !bool {
         const alloc = tfs.arena.allocator();
         const actual_events = tfs.events_in.items;
 
-        var unprocessed_events = try std.ArrayList(Event).initCapacity(alloc, actual_events.len);
-        try unprocessed_events.appendSlice(actual_events);
-        var unprocessed_scenarios = try std.ArrayList(Scenario).initCapacity(alloc, tfs.scenarios.len);
-        try unprocessed_scenarios.appendSlice(tfs.scenarios);
-
-        var matched_events = try std.ArrayList(Event).initCapacity(alloc, actual_events.len);
+        var matched_events = std.AutoHashMap(usize, void).init(alloc);
 
         log("checking expected {d} events against {d} scenarios...", .{ actual_events.len, tfs.scenarios.len });
-
-        var timer = try std.time.Timer.start();
-        const timeout = timeout_ms * 1_000_000;
-        while (timer.read() < timeout) {
-            if (unprocessed_events.items.len == 0) return true;
-            for (unprocessed_events.items, 0..unprocessed_events.items.len) |act_event, ei| {
-                for (unprocessed_scenarios.items) |scenario| {
-                    if (eq_event(scenario.expected_event, act_event)) {
-                        log("found match ", .{});
-                        try matched_events.append(unprocessed_events.swapRemove(ei));
-                    }
+        for (tfs.scenarios) |scenario| {
+            for (actual_events) |act_event| {
+                if (eq_event(scenario.expected_event, act_event)) {
+                    // TODO create a report of failed scenarios
+                    try matched_events.put(act_event.id.value, {});
                 }
-                // try s.exec(s.name);
             }
         }
 
-        return false;
+        return matched_events.count() == tfs.scenarios.len;
     }
     fn eq_event(e1: Event, e2: Event) bool {
         return @as(u32, @bitCast(e1.flags)) == @as(u32, @bitCast(e2.flags)) and std.mem.eql(u8, e1.path, e2.path);
